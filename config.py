@@ -9,7 +9,7 @@ def get_config():
         "d_model": 512,
         "model_folder": "model_M68",
         "model_basename": "M68",
-        "tokenizer_file": "tokenizer_{0}.json",
+        "tokenizer_file": "dataset_and_tokenizers/tokenizer_{0}.json",
     }
 
 def get_weights_file_path(config):
