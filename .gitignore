@@ -1,4 +1,4 @@
 *.json
 *.pt
 dataset_and_tokenizers/
-__pychache__
+__pycache__
