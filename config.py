@@ -17,4 +17,3 @@ def get_weights_file_path(config):
         return str(model_file_path)
     else:
         return None
-
