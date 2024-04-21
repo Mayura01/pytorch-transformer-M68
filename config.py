@@ -5,7 +5,7 @@ def get_config():
         "batch_size": 4,
         "num_epochs": 100,
         "lr": 10**-4,
-        "seq_len": 1024,
+        "seq_len": 400,
         "d_model": 512,
         "model_folder": "model_M68",
         "model_basename": "M68",
