@@ -13,6 +13,12 @@ def get_config():
     }
 
 def get_weights_file_path(config):
-    model_folder = f"{config['model_folder']}"
-    model_filename = f"{config['model_basename']}.pt"
-    return str(Path('.') / model_folder / model_filename)
+    model_folder = config.get('model_folder', '')
+    model_filename = f"{config.get('model_basename', '')}.pt"
+    
+    model_path = Path(model_folder) / model_filename
+    if model_path.exists():
+        return str(model_path)
+    else:
+        return None
+
