@@ -7,18 +7,14 @@ def get_config():
         "lr": 10**-4,
         "seq_len": 400,
         "d_model": 512,
-        "model_folder": "model_M68",
-        "model_basename": "M68",
+        "model_file_path": "model_M68/M68.pt",
         "tokenizer_file": "dataset_and_tokenizers/tokenizer_{0}.json",
     }
 
 def get_weights_file_path(config):
-    model_folder = config.get('model_folder', '')
-    model_filename = f"{config.get('model_basename', '')}.pt"
-    
-    model_path = Path(model_folder) / model_filename
-    if model_path.exists():
-        return str(model_path)
+    model_file_path = config.get('model_file_path', '')
+    if Path(model_file_path).exists():
+        return str(model_file_path)
     else:
         return None
 
