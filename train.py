@@ -24,7 +24,7 @@ def run_validation(config, model, tokenizer_src, tokenizer_tgt, device):
         console_width = 80
 
     with torch.no_grad():
-        sentence = "What roles did each member of Team IntelliAi play in creating IntelliAi?"
+        sentence = "Hi"
         source = tokenizer_src.encode(sentence)
         source = torch.cat([
             torch.tensor([tokenizer_src.token_to_id('[SOS]')], dtype=torch.int64), 
@@ -54,16 +54,19 @@ def run_validation(config, model, tokenizer_src, tokenizer_tgt, device):
         print('-'*console_width)      
 
 def get_ds(config):
-    with open('dataset_and_tokenizer/dataset.json', 'r') as f:
+    with open('dataset_and_tokenizers/dataset.json', 'r') as f:
         ds_raw = json.load(f)
 
-    # Build tokenizers and dataset
-    contexts = ['input', 'output']
-    tokenizer = get_or_build_tokenizer(config, ds_raw, contexts)
-    train_ds = BilingualDataset(ds_raw, tokenizer, tokenizer, config['seq_len'])
+    # Build tokenizers
+    context1 = 'input'
+    context2 = 'output'
+    tokenizer_src = get_or_build_tokenizer(config, ds_raw, context1)
+    tokenizer_tgt = get_or_build_tokenizer(config, ds_raw, context2)
+
+    train_ds = BilingualDataset(ds_raw, tokenizer_src, tokenizer_tgt, config['seq_len'])
     train_dataloader = DataLoader(train_ds, batch_size=config['batch_size'], shuffle=True)
 
-    return train_dataloader, tokenizer
+    return train_dataloader, tokenizer_src, tokenizer_tgt
 
 def get_model(config, vocab_src_len, vocab_tgt_len):
     model = build_transformer(vocab_src_len, vocab_tgt_len, config["seq_len"], config['seq_len'], d_model=config['d_model'])
@@ -79,8 +82,8 @@ def train_model(config):
         print(f"Device name: <mps>")
     device = torch.device(device)
 
-    train_dataloader, tokenizer = get_ds(config)
-    model = get_model(config, tokenizer.get_vocab_size(), tokenizer.get_vocab_size()).to(device)
+    train_dataloader, tokenizer_src, tokenizer_tgt = get_ds(config)
+    model = get_model(config, tokenizer_src.get_vocab_size(), tokenizer_tgt.get_vocab_size()).to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=config['lr'], eps=1e-9)
 
     initial_epoch = 0
@@ -94,7 +97,7 @@ def train_model(config):
     else:
         print('No model to preload, starting from scratch')
 
-    loss_fn = nn.CrossEntropyLoss(ignore_index=tokenizer.token_to_id('[PAD]'), label_smoothing=0.1).to(device)
+    loss_fn = nn.CrossEntropyLoss(ignore_index=tokenizer_src.token_to_id('[PAD]'), label_smoothing=0.1).to(device)
 
     for epoch in range(initial_epoch, config['num_epochs']):
         torch.cuda.empty_cache()
@@ -113,7 +116,7 @@ def train_model(config):
 
             label = batch['label'].to(device)
 
-            loss = loss_fn(proj_output.view(-1, tokenizer.get_vocab_size()), label.view(-1))
+            loss = loss_fn(proj_output.view(-1, tokenizer_tgt.get_vocab_size()), label.view(-1))
             batch_iterator.set_postfix({"loss": f"{loss.item():6.3f}"})
 
             loss.backward()
@@ -121,7 +124,7 @@ def train_model(config):
             optimizer.step()
             optimizer.zero_grad(set_to_none=True)
 
-        run_validation(config, model, tokenizer, tokenizer, device)
+        run_validation(config, model, tokenizer_src, tokenizer_tgt, device)
 
         model_filename = "model_M68/M68.pt"
         torch.save({
