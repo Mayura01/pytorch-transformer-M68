@@ -24,7 +24,7 @@ def run_validation(config, model, tokenizer_src, tokenizer_tgt, device):
         console_width = 80
 
     with torch.no_grad():
-        sentence = "Hi"
+        sentence = "Who created IntelliAi?"
         source = tokenizer_src.encode(sentence)
         source = torch.cat([
             torch.tensor([tokenizer_src.token_to_id('[SOS]')], dtype=torch.int64), 
@@ -54,7 +54,7 @@ def run_validation(config, model, tokenizer_src, tokenizer_tgt, device):
         print('-'*console_width)      
 
 def get_ds(config):
-    with open('dataset_and_tokenizers/dataset.json', 'r') as f:
+    with open('dataset_and_tokenizer/dataset.json', 'r') as f:
         ds_raw = json.load(f)
 
     # Build tokenizers

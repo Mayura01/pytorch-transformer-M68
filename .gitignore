@@ -1,5 +1,5 @@
 *.json
 *.pt
-dataset_and_tokenizers/
+dataset_and_tokenizer/
 model_M68/
 __pycache__
