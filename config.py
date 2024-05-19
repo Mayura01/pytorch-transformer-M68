@@ -2,6 +2,7 @@ from pathlib import Path
 
 def get_config():
     return {
+        "experiment_name": "Project_M68",
         "batch_size": 4,
         "num_epochs": 100,
         "lr": 10**-4,

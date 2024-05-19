@@ -15,7 +15,7 @@ def inference(sentence: str):
 
     # Load the pretrained weights
     model_filename = get_weights_file_path(config)
-    state = torch.load(model_filename)
+    state = torch.load(model_filename, map_location=torch.device('cpu'))
     model.load_state_dict(state['model_state_dict'])
     seq_len = config['seq_len']
 

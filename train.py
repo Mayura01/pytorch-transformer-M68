@@ -1,10 +1,10 @@
 from model import build_transformer
-from dataset import BilingualDataset
+from dataset import BilingualDataset, causal_mask
 from config import get_config, get_weights_file_path
 
 import torch
 import torch.nn as nn
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, random_split
 
 from tqdm import tqdm
 import warnings
@@ -14,47 +14,89 @@ import json
 
 from tokenizer import get_or_build_tokenizer
 
-def run_validation(config, model, tokenizer_src, tokenizer_tgt, device):
+import torchmetrics
+from torch.utils.tensorboard import SummaryWriter
+
+def greedy_decode(model, source, source_mask, tokenizer_src, tokenizer_tgt, max_len, device):
+    sos_idx = tokenizer_tgt.token_to_id('[SOS]')
+    eos_idx = tokenizer_tgt.token_to_id('[EOS]')
+
+    encoder_output = model.encode(source, source_mask)
+    decoder_input = torch.empty(1, 1).fill_(sos_idx).type_as(source).to(device)
+    while True:
+        if decoder_input.size(1) == max_len:
+            break
+
+        decoder_mask = causal_mask(decoder_input.size(1)).type_as(source_mask).to(device)
+        out = model.decode(encoder_output, source_mask, decoder_input, decoder_mask)
+
+        prob = model.project(out[:, -1])
+        _, next_word = torch.max(prob, dim=1)
+        decoder_input = torch.cat(
+            [decoder_input, torch.empty(1, 1).type_as(source).fill_(next_word.item()).to(device)], dim=1
+        )
+
+        if next_word == eos_idx:
+            break
+
+    return decoder_input.squeeze(0)
+
+
+def run_validation(model, validation_ds, tokenizer_src, tokenizer_tgt, max_len, device, print_msg, global_step, writer, num_examples=2):
     model.eval()
+    count = 0
+
+    source_texts = []
+    expected = []
     predicted = []
 
-    try:
-        console_width = os.get_terminal_size().columns
-    except OSError:
-        console_width = 80
+    console_width = 80
 
     with torch.no_grad():
-        sentence = "Who created IntelliAi?"
-        source = tokenizer_src.encode(sentence)
-        source = torch.cat([
-            torch.tensor([tokenizer_src.token_to_id('[SOS]')], dtype=torch.int64), 
-            torch.tensor(source.ids, dtype=torch.int64),
-            torch.tensor([tokenizer_src.token_to_id('[EOS]')], dtype=torch.int64),
-            torch.tensor([tokenizer_src.token_to_id('[PAD]')] * (config['seq_len'] - len(source.ids) - 2), dtype=torch.int64)
-        ], dim=0).to(device)
-        source_mask = (source != tokenizer_src.token_to_id('[PAD]')).unsqueeze(0).unsqueeze(0).int().to(device)
-        encoder_output = model.encode(source, source_mask)
-        decoder_input = torch.empty(1, 1).fill_(tokenizer_tgt.token_to_id('[SOS]')).type_as(source).to(device)
+        for batch in validation_ds:
+            count += 1
+            encoder_input = batch["encoder_input"].to(device) # (b, seq_len)
+            encoder_mask = batch["encoder_mask"].to(device) # (b, 1, 1, seq_len)
 
-        while decoder_input.size(1) < config['seq_len']:
-            decoder_mask = torch.triu(torch.ones((1, decoder_input.size(1), decoder_input.size(1))), diagonal=1).type(torch.int).type_as(source_mask).to(device)
-            out = model.decode(encoder_output, source_mask, decoder_input, decoder_mask)
-            prob = model.project(out[:, -1])
-            _, next_word = torch.max(prob, dim=1)
-            decoder_input = torch.cat([decoder_input, torch.empty(1, 1).type_as(source).fill_(next_word.item()).to(device)], dim=1)
+            assert encoder_input.size(0) == 1, "Batch size must be 1 for validation"
 
-            predicted.append(tokenizer_tgt.decode([next_word.item()]))
+            model_out = greedy_decode(model, encoder_input, encoder_mask, tokenizer_src, tokenizer_tgt, max_len, device)
 
-            if next_word == tokenizer_tgt.token_to_id('[EOS]'):
-                break
+            source_text = batch["src_text"][0]
+            target_text = batch["tgt_text"][0]
+            model_out_text = tokenizer_tgt.decode(model_out.detach().cpu().numpy())
+
+            source_texts.append(source_text)
+            expected.append(target_text)
+            predicted.append(model_out_text)
             
-        print('-'*console_width)
-        print("SOURCE: ", sentence)
-        print("PREDICTED: ", ' '.join(predicted))
-        print('-'*console_width)      
+            print_msg('-'*console_width)
+            print_msg(f"{f'SOURCE: ':>12}{source_text}")
+            print_msg(f"{f'TARGET: ':>12}{target_text}")
+            print_msg(f"{f'PREDICTED: ':>12}{model_out_text}")
+
+            if count == num_examples:
+                print_msg('-'*console_width)
+                break
+    
+    if writer:
+        metric = torchmetrics.CharErrorRate()
+        cer = metric(predicted, expected)
+        writer.add_scalar('validation cer', cer, global_step)
+        writer.flush()
+
+        metric = torchmetrics.WordErrorRate()
+        wer = metric(predicted, expected)
+        writer.add_scalar('validation wer', wer, global_step)
+        writer.flush()
+
+        metric = torchmetrics.BLEUScore()
+        bleu = metric(predicted, expected)
+        writer.add_scalar('validation BLEU', bleu, global_step)
+        writer.flush()     
 
 def get_ds(config):
-    with open('dataset_and_tokenizer/dataset.json', 'r') as f:
+    with open('dataset_and_tokenizer/dataset.json', 'r', encoding='utf-8') as f:
         ds_raw = json.load(f)
 
     # Build tokenizers
@@ -63,10 +105,18 @@ def get_ds(config):
     tokenizer_src = get_or_build_tokenizer(config, ds_raw, context1)
     tokenizer_tgt = get_or_build_tokenizer(config, ds_raw, context2)
 
-    train_ds = BilingualDataset(ds_raw, tokenizer_src, tokenizer_tgt, config['seq_len'])
-    train_dataloader = DataLoader(train_ds, batch_size=config['batch_size'], shuffle=True)
+    train_ds_size = int(0.95 * len(ds_raw))
+    val_ds_size = len(ds_raw) - train_ds_size
+    train_ds_raw, val_ds_raw = random_split(ds_raw, [train_ds_size, val_ds_size])
 
-    return train_dataloader, tokenizer_src, tokenizer_tgt
+
+    train_ds = BilingualDataset(train_ds_raw, tokenizer_src, tokenizer_tgt, config['seq_len'])
+    val_ds = BilingualDataset(val_ds_raw, tokenizer_src, tokenizer_tgt, config['seq_len'])
+
+    train_dataloader = DataLoader(train_ds, batch_size=config['batch_size'], shuffle=True)
+    val_dataloader = DataLoader(val_ds, batch_size=1, shuffle=True)
+
+    return train_dataloader, val_dataloader, tokenizer_src, tokenizer_tgt
 
 def get_model(config, vocab_src_len, vocab_tgt_len):
     model = build_transformer(vocab_src_len, vocab_tgt_len, config["seq_len"], config['seq_len'], d_model=config['d_model'])
@@ -82,11 +132,15 @@ def train_model(config):
         print(f"Device name: <mps>")
     device = torch.device(device)
 
-    train_dataloader, tokenizer_src, tokenizer_tgt = get_ds(config)
+    train_dataloader,val_dataloader, tokenizer_src, tokenizer_tgt = get_ds(config)
     model = get_model(config, tokenizer_src.get_vocab_size(), tokenizer_tgt.get_vocab_size()).to(device)
+    # Tensorboard
+    writer = SummaryWriter(config['experiment_name'])
+
     optimizer = torch.optim.Adam(model.parameters(), lr=config['lr'], eps=1e-9)
 
     initial_epoch = 0
+    global_step = 0
     model_filename = get_weights_file_path(config)
     if model_filename:
         print(f'Preloading model {model_filename}')
@@ -94,6 +148,7 @@ def train_model(config):
         model.load_state_dict(state['model_state_dict'])
         initial_epoch = state['epoch'] + 1
         optimizer.load_state_dict(state['optimizer_state_dict'])
+        global_step = state['global_step']
     else:
         print('No model to preload, starting from scratch')
 
@@ -103,8 +158,11 @@ def train_model(config):
         torch.cuda.empty_cache()
         model.train()
         batch_iterator = tqdm(train_dataloader, desc=f"Processing Epoch {epoch:02d}")
-        for batch in batch_iterator:
+        total_loss = 0
+        total_accuracy = 0
+        num_batches = len(train_dataloader)
 
+        for batch in batch_iterator:
             encoder_input = batch['encoder_input'].to(device) # (b, seq_len)
             decoder_input = batch['decoder_input'].to(device) # (B, seq_len)
             encoder_mask = batch['encoder_mask'].to(device) # (B, 1, 1, seq_len)
@@ -117,20 +175,31 @@ def train_model(config):
             label = batch['label'].to(device)
 
             loss = loss_fn(proj_output.view(-1, tokenizer_tgt.get_vocab_size()), label.view(-1))
-            batch_iterator.set_postfix({"loss": f"{loss.item():6.3f}"})
+            total_loss += loss.item()
 
             loss.backward()
 
             optimizer.step()
             optimizer.zero_grad(set_to_none=True)
 
-        run_validation(config, model, tokenizer_src, tokenizer_tgt, device)
+            
+        global_step += 1
+        # Log the loss
+        writer.add_scalar('train loss', total_loss, global_step)
+        writer.flush()
+
+        avg_loss = total_loss / num_batches
+        writer.add_scalar('train average loss', avg_loss, epoch)
+
+        run_validation(model, val_dataloader, tokenizer_src, tokenizer_tgt, config['seq_len'], device, lambda msg: batch_iterator.write(msg), global_step, writer)
+
 
         model_filename = "model_M68/M68.pt"
         torch.save({
             'epoch': epoch,
             'model_state_dict': model.state_dict(),
             'optimizer_state_dict': optimizer.state_dict(),
+            'global_step': global_step,
         }, model_filename)
 
 
