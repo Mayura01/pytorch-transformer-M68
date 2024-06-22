@@ -1,6 +1,6 @@
 from model import build_transformer
 from dataset import BilingualDataset, causal_mask
-from config import get_config, get_weights_file_path
+from config import get_config
 
 import torch
 import torch.nn as nn
@@ -11,6 +11,7 @@ import warnings
 import os
 import sys
 import json
+from pathlib import Path
 
 from tokenizer import get_or_build_tokenizer
 
@@ -118,8 +119,15 @@ def get_ds(config):
 
     return train_dataloader, val_dataloader, tokenizer_src, tokenizer_tgt
 
+def get_weights_file_path(config):
+    model_file_path = config.get('model_file_path', '')
+    if Path(model_file_path).exists():
+        return str(model_file_path)
+    else:
+        return None
+
 def get_model(config, vocab_src_len, vocab_tgt_len):
-    model = build_transformer(vocab_src_len, vocab_tgt_len, config["seq_len"], config['seq_len'], d_model=config['d_model'])
+    model = build_transformer(vocab_src_len, vocab_tgt_len, config["seq_len"], config['seq_len'], d_model=config['d_model'],N=config['n_layes'],h=config['head'],dropout=config['dropout'],d_ff=config['d_ff'])
     return model
 
 def train_model(config):
